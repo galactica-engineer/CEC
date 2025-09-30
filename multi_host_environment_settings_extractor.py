@@ -53,6 +53,7 @@ def parse_ifconfig(output):
 
     return interfaces
 
+
 def parse_route(output):
     """Parse 'route -n' output into a list of dictionaries."""
     routes = []
@@ -83,8 +84,6 @@ def parse_route(output):
             routes.append(route_entry)
 
     return routes
-
-
 
 
 # ---------------- File Handling ----------------
@@ -149,6 +148,7 @@ def get_ifconfig(host):
         return parse_ifconfig(raw_output)
     return None
 
+
 def get_routes(host):
     """Get and parse route -n output from a remote host."""
     raw_output = ssh_command(host, "/sbin/route -n")
@@ -156,6 +156,67 @@ def get_routes(host):
         return parse_route(raw_output)
     return None
 
+
+# ---------------- Comparison ----------------
+def strip_timestamp(filename):
+    """
+    Strip timestamp from a filename like 'host_ifconfig_YYYYMMDD_HHMMSS.json'.
+    Returns 'host_ifconfig'.
+    """
+    return re.sub(r"_\d{8}_\d{6}\.json$", "", filename)
+
+
+def compare_json_files(base_file, new_file):
+    """Compare two JSON files and return True if identical, else False."""
+    try:
+        with open(base_file, "r") as f1, open(new_file, "r") as f2:
+            base_data = json.load(f1)
+            new_data = json.load(f2)
+        return base_data == new_data
+    except Exception as e:
+        print(f"[ERROR] Comparing {base_file} and {new_file}: {e}")
+        return False
+
+def find_base_file(base_dir, key):
+    """Find base file ignoring timestamp, prefer latest if multiple exist."""
+    pattern = f"{key}*.json"
+    matches = sorted(Path(base_dir).glob(pattern))
+    if matches:
+        return matches[-1]  # latest (by sort order)
+    return None
+
+def compare_extractions(base_dir, new_dir, output_dir):
+    """
+    Compare new extraction JSON files against base values.
+    Print pass/fail per host and save results into a JSON summary.
+    """
+    results = {}
+
+    new_files = list(Path(new_dir).glob("*.json"))
+    for new_file in new_files:
+        key = strip_timestamp(new_file.name)
+
+	base_file = find_base_file(base_dir, key)
+	if not base_file:
+    	    results[key] = "MISSING_BASE"
+#    	    print(f"[WARN] No base file for {key}")
+    	    continue
+
+        match = compare_json_files(base_file, new_file)
+        results[key] = "PASS" if match else "FAIL"
+#        print(f"[{results[key]}] {key}")
+
+    # Save results summary
+    timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
+    summary_file = Path(output_dir) / f"comparison_summary_{timestamp}.json"
+    try:
+        with open(summary_file, "w") as f:
+            json.dump(results, f, indent=4)
+        print(f"[OK] Comparison results saved to {summary_file}")
+    except Exception as e:
+        print(f"[ERROR] Saving comparison summary: {e}")
+
+    return results
 
 # ---------------- Main ----------------
 def main():
@@ -178,15 +239,28 @@ def main():
 
     for host in hosts:
         print(f"[*] Connecting to {host}...")
+
+	# --- ifconfig ---
         parsed_ifconfig = get_ifconfig(host)
         if parsed_ifconfig:
             save_to_json(parsed_ifconfig, f"{host}_ifconfig", output_dir)
 
-    for host in hosts:
-        print(f"[*] Connecting to {host}...")
+	# --- route -n ---
         parsed_routes = get_routes(host)
         if parsed_routes:
             save_to_json(parsed_routes, f"{host}_routes", output_dir)
+
+    # Run comparison against base values if directory exists
+    base_dir = Path(__file__).parent / "base_value_jsons"
+    if base_dir.exists():
+	print("\n=== Camparison Summary ===")
+        results = compare_extractions(base_dir, output_dir, output_dir)
+
+        # Print all host results at once
+        for key, status in results.items():
+            print(f"[{status}] {key}")
+    else:
+        print("[WARN] No base_value_jsons directory found. Skipping comparison.")
 
 
 if __name__ == "__main__":
